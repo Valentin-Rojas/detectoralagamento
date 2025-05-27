@@ -1,0 +1,291 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
+
+// Configurações WiFi
+const char* ssid = "Visitantes";
+const char* password = "01619041901";
+
+// Pinos dos sensores
+const int trigPin = 23;
+const int echoPin = 22;
+const int rainSensorPin = 21;
+const int buzzerPin = 12;
+
+// Limiares e configurações
+const float DANGER_THRESHOLD = 30.0;   // 30cm (nível crítico)
+const float WARNING_THRESHOLD = 50.0;  // 50cm (nível de alerta)
+const float HYSTERESIS = 5.0;          // 5cm de histerese para evitar oscilações
+const int MAX_LOG_ENTRIES = 20;        // Máximo de entradas no log
+
+// Variáveis de medição
+float distance = 0;
+bool isRaining = false;
+String alertStatus = "Normal";
+String previousStatus = "";
+
+// Sistema de log
+String logEntries[MAX_LOG_ENTRIES];
+int logIndex = 0;
+
+// Cria o servidor web na porta 80
+WebServer server(80);
+
+// Página HTML (mantida igual ao anterior)
+const char* htmlPage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Monitor de Alagamentos</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { 
+      font-family: 'Segoe UI', Arial, sans-serif; 
+      text-align: center; 
+      margin: 0; 
+      padding: 20px;
+      background-color: #f5f5f5;
+    }
+    .container { 
+      max-width: 800px; 
+      margin: 0 auto; 
+      background: white;
+      padding: 20px;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    .status-box { 
+      padding: 20px; 
+      margin: 10px 0; 
+      border-radius: 10px; 
+      color: white;
+      font-weight: bold;
+    }
+    .normal { background-color: #4CAF50; }
+    .warning { background-color: #FFC107; color: #333; }
+    .danger { background-color: #F44336; }
+    .data { 
+      margin: 20px 0; 
+      font-size: 24px;
+      color: #333;
+    }
+    .rain { 
+      margin-top: 30px; 
+      padding: 10px;
+      background-color: #e3f2fd;
+      border-radius: 5px;
+    }
+    h1 {
+      color: #2c3e50;
+      margin-bottom: 30px;
+    }
+    .last-update {
+      font-size: 14px;
+      color: #7f8c8d;
+      margin-top: 20px;
+    }
+    .log-container {
+      margin-top: 30px;
+      text-align: left;
+      border-top: 1px solid #eee;
+      padding-top: 20px;
+    }
+    .log-title {
+      font-size: 18px;
+      color: #2c3e50;
+      margin-bottom: 10px;
+    }
+    .log-entry {
+      padding: 8px;
+      border-bottom: 1px solid #eee;
+      font-size: 14px;
+    }
+    .log-time {
+      color: #7f8c8d;
+      font-weight: bold;
+    }
+    .log-normal { color: #4CAF50; }
+    .log-warning { color: #FFC107; }
+    .log-danger { color: #F44336; }
+  </style>
+  <meta http-equiv="refresh" content="5">
+</head>
+<body>
+  <div class="container">
+    <h1>🌧️ Monitor de Alagamentos 🚨</h1>
+    
+    <div class="status-box %STATUS_CLASS%">
+      <h2>Status: %STATUS%</h2>
+    </div>
+    
+    <div class="data">
+      <p>📏 Nível da água: <strong>%DISTANCE% cm</strong></p>
+      <div class="rain">
+        <p>☔ Condição de chuva: <strong>%RAIN%</strong></p>
+      </div>
+    </div>
+    
+    <p class="last-update">⌚ Última atualização: %TIME%</p>
+    
+    <div class="log-container">
+      <div class="log-title">📜 Histórico de Eventos:</div>
+      %LOG_ENTRIES%
+    </div>
+  </div>
+</body>
+</html>
+)rawliteral";
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Configura pinos
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(rainSensorPin, INPUT);
+  pinMode(buzzerPin, OUTPUT);
+  
+  // Conecta WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  Serial.println("");
+  Serial.print("Conectado! IP: ");
+  Serial.println(WiFi.localIP());
+
+  // Inicializa o log
+  addLogEntry("Sistema iniciado. Status inicial: Normal");
+  
+  // Configura rotas do servidor web
+  server.on("/", handleRoot);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  
+  // Atualiza medições
+  distance = measureDistance();
+  isRaining = digitalRead(rainSensorPin) == LOW;
+  
+  // Determina status com histerese
+  previousStatus = alertStatus;
+  
+  // Lógica corrigida com histerese
+  if (distance < DANGER_THRESHOLD - (alertStatus.indexOf("Perigo") >= 0 ? 0 : HYSTERESIS)) {
+    alertStatus = "Perigo! Nível crítico";
+    triggerAlarmSound(true);  // Alarme contínuo para perigo
+  } 
+  else if (distance < WARNING_THRESHOLD - (alertStatus.indexOf("Alerta") >= 0 ? 0 : HYSTERESIS)) {
+    alertStatus = "Alerta! Nível elevado";
+    if (isRaining) {
+      alertStatus += " e chovendo";
+    }
+    triggerAlarmSound(false);  // Alarme intermitente para alerta
+  }
+  else {
+    alertStatus = "Normal";
+    noTone(buzzerPin);  // Desliga o alarme se estiver normal
+  }
+  
+  // Registra mudança de status no log
+  if (alertStatus != previousStatus) {
+    String logMessage = "Status alterado de '" + previousStatus + "' para '" + alertStatus + "'";
+    logMessage += " | Água: " + String(distance) + "cm";
+    logMessage += " | Chuva: " + String(isRaining ? "Sim" : "Não");
+    addLogEntry(logMessage);
+  }
+  
+  delay(1000);
+}
+
+void handleRoot() {
+  String page = htmlPage;
+  
+  // Substitui placeholders pelos valores atuais
+  page.replace("%DISTANCE%", String(distance));
+  page.replace("%RAIN%", isRaining ? "Chovendo" : "Sem chuva");
+  page.replace("%TIME%", getTime());
+  page.replace("%STATUS%", alertStatus);
+  
+  // Define a classe CSS baseada no status
+  String statusClass = "";
+  if (alertStatus.indexOf("Perigo") >= 0) {
+    statusClass = "danger";
+  } 
+  else if (alertStatus.indexOf("Alerta") >= 0) {
+    statusClass = "warning";
+  } 
+  else {
+    statusClass = "normal";
+  }
+  page.replace("%STATUS_CLASS%", statusClass);
+  
+  // Gera as entradas de log para a página
+  String logHtml = "";
+  for (int i = 0; i < MAX_LOG_ENTRIES; i++) {
+    int idx = (logIndex + MAX_LOG_ENTRIES - 1 - i) % MAX_LOG_ENTRIES;
+    if (logEntries[idx].length() > 0) {
+      String entryClass = "log-entry";
+      if (logEntries[idx].indexOf("Perigo") >= 0) entryClass += " log-danger";
+      else if (logEntries[idx].indexOf("Alerta") >= 0) entryClass += " log-warning";
+      else if (logEntries[idx].indexOf("Normal") >= 0) entryClass += " log-normal";
+      
+      logHtml += "<div class='" + entryClass + "'><span class='log-time'>" + 
+                getShortTime() + "</span> " + logEntries[idx] + "</div>";
+    }
+  }
+  page.replace("%LOG_ENTRIES%", logHtml);
+  
+  server.send(200, "text/html", page);
+}
+
+void addLogEntry(String message) {
+  String fullMessage = "[" + getTime() + "] " + message;
+  Serial.println(fullMessage);
+  
+  logEntries[logIndex] = fullMessage;
+  logIndex = (logIndex + 1) % MAX_LOG_ENTRIES;
+}
+
+String getTime() {
+  // Simula hora atual (em um sistema real, usar RTC ou NTP)
+  unsigned long seconds = millis() / 1000;
+  unsigned long minutes = seconds / 60;
+  unsigned long hours = minutes / 60;
+  return String(hours % 24) + ":" + 
+         String(minutes % 60) + ":" + 
+         String(seconds % 60);
+}
+
+String getShortTime() {
+  unsigned long seconds = millis() / 1000;
+  unsigned long minutes = seconds / 60;
+  return String(minutes % 60) + "m " + String(seconds % 60) + "s";
+}
+
+float measureDistance() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  
+  long duration = pulseIn(echoPin, HIGH);
+  return duration * 0.034 / 2;
+}
+
+void triggerAlarmSound(bool continuous) {
+  if (continuous) {
+    tone(buzzerPin, 1000); // Alarme contínuo para perigo
+  } else {
+    tone(buzzerPin, 1000, 500); // Alarme intermitente para alerta
+    delay(500);
+    noTone(buzzerPin);
+    delay(500);
+  }
+}
