@@ -6,12 +6,12 @@
 #include <time.h>
 
 // Configurações WiFi
-const char* ssid = "ValeDesktop";
-const char* password = "12ValeDesktop34";
+const char* ssid = "EspacoMaker_Tp-link";
+const char* password = "Guilherme";
 
 // Configurações do Bot Telegram para GRUPO
-const String BOT_TOKEN = "SEU_BOT_TOKEN_AQUI";    // Token do seu bot
-const String GROUP_CHAT_ID = "SEU_GROUP_ID_AQUI"; //
+const String BOT_TOKEN = "token";    // Token do seu bot
+const String GROUP_CHAT_ID = "-1002632781146"; //
 const String TELEGRAM_URL = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage";
 
 // Pinos dos sensores
@@ -20,12 +20,24 @@ const int echoPin = 17;      // Echo do JSN-SR04T conectado no GPIO17
 const int rainSensorPin = 36; // AO do YL-83 conectado no GPIO36
 const int buzzerPin = 12;
 
+// ============ PINOS DOS LEDs INDICADORES ============
+const int LED_AZUL = 4;      // LED Azul - Conexão Internet
+const int LED_BRANCO = 5;    // LED Branco - Conexão Telegram
+const int LED_VERMELHO = 18; // LED Vermelho - Alagando (PERIGO)
+const int LED_AMARELO = 32;  // LED Amarelo - Alerta (GPIO35)
+const int LED_VERDE = 21;    // LED Verde - Status Normal
+
+// Variáveis para controle de timers não-bloqueantes
+unsigned long lastBuzzerUpdate = 0;
+unsigned long lastLEDUpdate = 0;
+const unsigned long LED_UPDATE_INTERVAL = 50;  // 50ms para LEDs fluidos
+
 // Limiares e configurações
 const float DANGER_THRESHOLD = 30.0;   // 30cm (nível crítico)
 const float WARNING_THRESHOLD = 50.0;  // 50cm (nível de alerta)
 const float HYSTERESIS = 5.0;          // 5cm de histerese
 const int MAX_LOG_ENTRIES = 20;        // Máximo de entradas no log
-const int RAIN_THRESHOLD = 3000;       // Limiar analógico para chuva (ajuste conforme necessário)
+const int RAIN_THRESHOLD = 3000;       // Limiar analógico para chuva
 
 // Variáveis de medição
 float distance = 0;
@@ -35,7 +47,7 @@ String previousStatus = "";
 
 // Controle do Telegram
 unsigned long lastTelegramSent = 0;
-const unsigned long TELEGRAM_COOLDOWN = 300000; // 5 minutos entre mensagens do mesmo tipo
+const unsigned long TELEGRAM_COOLDOWN = 300000; // 5 minutos entre mensagens
 String lastTelegramStatus = "";
 
 // Controle de medições e debug
@@ -55,7 +67,142 @@ int logIndex = 0;
 // Cria o servidor web na porta 80
 WebServer server(80);
 
-// Página HTML com atualização AJAX mais rápida
+// ============ FUNÇÕES DE CONTROLE DOS LEDs ============
+
+void initializeLEDs() {
+  // Configura todos os LEDs como saída
+  pinMode(LED_AZUL, OUTPUT);
+  pinMode(LED_BRANCO, OUTPUT);
+  pinMode(LED_VERMELHO, OUTPUT);
+  pinMode(LED_AMARELO, OUTPUT);
+  pinMode(LED_VERDE, OUTPUT);
+  
+  // Inicia todos desligados
+  digitalWrite(LED_AZUL, LOW);
+  digitalWrite(LED_BRANCO, LOW);
+  digitalWrite(LED_VERMELHO, LOW);
+  digitalWrite(LED_AMARELO, LOW);
+  digitalWrite(LED_VERDE, LOW);
+  
+  Serial.println("💡 LEDs inicializados:");
+  Serial.println("🔵 LED Azul (GPIO4) - Conexão Internet");
+  Serial.println("⚪ LED Branco (GPIO5) - Conexão Telegram");
+  Serial.println("🔴 LED Vermelho (GPIO18) - Alagando");
+  Serial.println("🟡 LED Amarelo (GPIO19) - Alerta");
+  Serial.println("🟢 LED Verde (GPIO21) - Status Normal");
+}
+
+void updateInternetLED() {
+  if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(LED_AZUL, HIGH);  // Liga LED azul se conectado
+  } else {
+    // Pisca LED azul se desconectado
+    static unsigned long lastBlink = 0;
+    static bool ledState = false;
+    
+    if (millis() - lastBlink > 500) {
+      ledState = !ledState;
+      digitalWrite(LED_AZUL, ledState);
+      lastBlink = millis();
+    }
+  }
+}
+
+void updateTelegramLED() {
+  bool telegramOK = (BOT_TOKEN != "SEU_BOT_TOKEN_AQUI" && 
+                     GROUP_CHAT_ID != "SEU_GROUP_ID_AQUI" && 
+                     WiFi.status() == WL_CONNECTED);
+  
+  if (telegramOK) {
+    digitalWrite(LED_BRANCO, HIGH);  // Liga LED branco se Telegram configurado
+  } else {
+    // Pisca LED branco se não configurado
+    static unsigned long lastBlink = 0;
+    static bool ledState = false;
+    
+    if (millis() - lastBlink > 750) {
+      ledState = !ledState;
+      digitalWrite(LED_BRANCO, ledState);
+      lastBlink = millis();
+    }
+  }
+}
+
+void updateStatusLEDs() {
+  // Primeiro desliga todos os LEDs de status
+  digitalWrite(LED_VERMELHO, LOW);
+  digitalWrite(LED_AMARELO, LOW);
+  digitalWrite(LED_VERDE, LOW);
+  
+  // Liga o LED apropriado baseado no status
+  if (alertStatus.indexOf("PERIGO") >= 0) {
+    // LED VERMELHO - Pisca mais devagar e fica mais tempo ligado
+    static unsigned long lastDangerBlink = 0;
+    static bool dangerLedState = false;
+    
+    if (millis() - lastDangerBlink > 300) {  // Mudou de 200ms para 300ms
+      dangerLedState = !dangerLedState;
+      
+      if (dangerLedState) {
+        // Liga por mais tempo (700ms ligado)
+        digitalWrite(LED_VERMELHO, HIGH);
+        lastDangerBlink = millis();
+      } else {
+        // Desliga por menos tempo (300ms desligado)
+        digitalWrite(LED_VERMELHO, LOW);
+        lastDangerBlink = millis() - 400; // Faz ficar menos tempo desligado
+      }
+    }
+  } else if (alertStatus.indexOf("ALERTA") >= 0) {
+    // LED AMARELO - Pisca lento para ALERTA
+    static unsigned long lastWarningBlink = 0;
+    static bool warningLedState = false;
+    
+    if (millis() - lastWarningBlink > 1000) {  // Pisca lento (1s)
+      warningLedState = !warningLedState;
+      digitalWrite(LED_AMARELO, warningLedState);
+      lastWarningBlink = millis();
+    }
+  } else {
+    // LED VERDE - Fixo para status NORMAL
+    digitalWrite(LED_VERDE, HIGH);
+  }
+}
+
+void updateAllLEDs() {
+  updateInternetLED();
+  updateTelegramLED();
+  updateStatusLEDs();
+}
+
+void testAllLEDs() {
+  Serial.println("🧪 Testando todos os LEDs...");
+  
+  // Liga todos os LEDs por 1 segundo SEM delay()
+  int leds[] = {LED_AZUL, LED_BRANCO, LED_VERMELHO, LED_AMARELO, LED_VERDE};
+  String cores[] = {"Azul", "Branco", "Vermelho", "Amarelo", "Verde"};
+  
+  // Teste rápido sequencial (sem delay)
+  for (int i = 0; i < 5; i++) {
+    Serial.println("Testando LED " + cores[i]);
+    digitalWrite(leds[i], HIGH);
+  }
+  
+  // Aguarda usando millis() em vez de delay
+  unsigned long startTime = millis();
+  while (millis() - startTime < 1000) {
+    // Não faz nada, só aguarda
+  }
+  
+  // Desliga todos
+  for (int i = 0; i < 5; i++) {
+    digitalWrite(leds[i], LOW);
+  }
+  
+  Serial.println("✅ Teste dos LEDs concluído!");
+}
+
+// ============ PÁGINA HTML COM INDICADORES DE LEDs ============
 const char* htmlPage = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -107,6 +254,41 @@ const char* htmlPage = R"rawliteral(
     @keyframes pulse {
       0%, 100% { transform: scale(1); }
       50% { transform: scale(1.02); }
+    }
+    .led-status {
+      background: #f8f9fa;
+      border-radius: 10px;
+      padding: 20px;
+      margin: 15px 0;
+      border-left: 4px solid #6c757d;
+    }
+    .led-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 15px;
+      margin: 20px 0;
+    }
+    .led-indicator {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 15px;
+      border-radius: 8px;
+      background: #f8f9fa;
+      border: 2px solid #dee2e6;
+      font-weight: bold;
+      font-size: 14px;
+    }
+    .led-on { background: #d4edda; border-color: #28a745; }
+    .led-blink { 
+      background: #fff3cd; 
+      border-color: #ffc107; 
+      animation: blink 1s infinite; 
+    }
+    .led-off { background: #f8d7da; border-color: #dc3545; }
+    @keyframes blink {
+      0%, 50% { opacity: 1; }
+      51%, 100% { opacity: 0.3; }
     }
     .sensor-card {
       background: #f8f9fa;
@@ -178,7 +360,6 @@ const char* htmlPage = R"rawliteral(
     .log-normal { border-left: 4px solid #4CAF50; }
     .log-warning { border-left: 4px solid #FFC107; }
     .log-danger { border-left: 4px solid #F44336; }
-    /* Removido efeito de loading roxo */
   </style>
 </head>
 <body>
@@ -187,6 +368,17 @@ const char* htmlPage = R"rawliteral(
     
     <div class="status-box %STATUS_CLASS%" id="statusBox">
       <h2>Status: <span id="statusText">%STATUS%</span></h2>
+    </div>
+    
+    <div class="led-status">
+      <h3>💡 Status dos LEDs Indicadores</h3>
+      <div class="led-grid" id="ledGrid">
+        <div class="led-indicator" id="ledAzul">🔵 Internet</div>
+        <div class="led-indicator" id="ledBranco">⚪ Telegram</div>
+        <div class="led-indicator" id="ledVermelho">🔴 Perigo</div>
+        <div class="led-indicator" id="ledAmarelo">🟡 Alerta</div>
+        <div class="led-indicator" id="ledVerde">🟢 Normal</div>
+      </div>
     </div>
     
     <div class="sensor-card">
@@ -217,7 +409,12 @@ const char* htmlPage = R"rawliteral(
   </div>
 
   <script>
-    // Atualização AJAX a cada 3 segundos (sem efeito visual)
+    function updateLEDStatus(ledId, status) {
+      const led = document.getElementById(ledId);
+      led.className = 'led-indicator led-' + status;
+    }
+    
+    // Atualização AJAX a cada 3 segundos
     function updateData() {
       fetch('/api/data')
         .then(response => response.json())
@@ -234,6 +431,13 @@ const char* htmlPage = R"rawliteral(
           // Atualiza classe do status
           const statusBox = document.getElementById('statusBox');
           statusBox.className = 'status-box ' + data.statusClass;
+          
+          // Atualiza status dos LEDs
+          updateLEDStatus('ledAzul', data.ledInternet);
+          updateLEDStatus('ledBranco', data.ledTelegram);
+          updateLEDStatus('ledVermelho', data.ledPerigo);
+          updateLEDStatus('ledAmarelo', data.ledAlerta);
+          updateLEDStatus('ledVerde', data.ledNormal);
           
           // Atualiza logs
           document.getElementById('logEntries').innerHTML = data.logEntries;
@@ -253,11 +457,18 @@ const char* htmlPage = R"rawliteral(
 </html>
 )rawliteral";
 
+// ============ FUNÇÃO SETUP ============
 void setup() {
   Serial.begin(115200);
-  Serial.println("=== Monitor de Alagamentos com Telegram ===");
+  Serial.println("=== Monitor de Alagamentos com LEDs ===");
   
-  // Configura pinos
+  // ============ INICIALIZA LEDs ============
+  initializeLEDs();
+  
+  // Teste inicial dos LEDs
+  testAllLEDs();
+  
+  // Configura pinos dos sensores
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
   pinMode(rainSensorPin, INPUT);
@@ -265,7 +476,11 @@ void setup() {
   
   // Teste inicial do buzzer
   tone(buzzerPin, 1000, 200);
-  delay(300);
+  // Aguarda sem travar o código
+  unsigned long buzzStart = millis();
+  while (millis() - buzzStart < 300) {
+    // Aguarda 300ms sem delay()
+  }
   noTone(buzzerPin);
   
   // Conecta WiFi
@@ -277,6 +492,7 @@ void setup() {
     delay(500);
     Serial.print(".");
     attempts++;
+    updateInternetLED(); // Atualiza LED durante conexão
   }
   
   if (WiFi.status() == WL_CONNECTED) {
@@ -287,7 +503,10 @@ void setup() {
     Serial.print(WiFi.RSSI());
     Serial.println(" dBm");
     
-    // Configura horário via NTP (versão segura)
+    // Liga LED azul (internet conectada)
+    digitalWrite(LED_AZUL, HIGH);
+    
+    // Configura horário via NTP
     Serial.print("🕐 Sincronizando horário com NTP...");
     configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org");
     
@@ -314,6 +533,12 @@ void setup() {
     
     // Teste do bot Telegram
     String initMessage = "🚀 SISTEMA DE MONITORAMENTO INICIADO!\n\n";
+    initMessage += "💡 LEDs indicadores ativados:\n";
+    initMessage += "🔵 Azul: Conexão Internet\n";
+    initMessage += "⚪ Branco: Conexão Telegram\n";
+    initMessage += "🔴 Vermelho: Alagamento\n";
+    initMessage += "🟡 Amarelo: Alerta\n";
+    initMessage += "🟢 Verde: Normal\n\n";
     initMessage += "📍 Localização: Monitor de Alagamentos\n";
     initMessage += "🌐 IP do sistema: " + WiFi.localIP().toString() + "\n";
     initMessage += "⏰ Horário de inicialização: " + getRealTime() + "\n";
@@ -322,24 +547,32 @@ void setup() {
     sendTelegramMessage(initMessage);
   } else {
     Serial.println("❌ Falha na conexão WiFi!");
+    // LED azul ficará piscando (configurado na função updateInternetLED)
   }
 
   // Inicializa o log
-  addLogEntry("Sistema iniciado. Status inicial: Normal");
+  addLogEntry("Sistema iniciado com LEDs. Status inicial: Normal");
+  
+  // Liga LED verde (status normal inicial)
+  digitalWrite(LED_VERDE, HIGH);
   
   // Configura rotas do servidor web
   server.on("/", handleRoot);
-  server.on("/api/data", handleApiData); // Nova rota para dados JSON
+  server.on("/api/data", handleApiData);
   server.begin();
   
   Serial.println("🌐 Servidor web iniciado!");
   Serial.println("=========================");
 }
 
+// ============ INÍCIO DO LOOP PRINCIPAL ============
 void loop() {
   server.handleClient();
   
   unsigned long currentTime = millis();
+  
+  // Atualiza LEDs continuamente
+  updateAllLEDs();
   
   // Atualiza medições em intervalo controlado
   if (currentTime - lastMeasurement >= MEASUREMENT_INTERVAL) {
@@ -364,7 +597,7 @@ void loop() {
       Serial.println("====================");
     }
     
-    // Determina status com histerese CORRIGIDA
+    // Determina status com histerese
     previousStatus = alertStatus;
     
     if (distance <= DANGER_THRESHOLD) {
@@ -372,7 +605,6 @@ void loop() {
       triggerAlarmSound(true);
     } 
     else if (distance <= DANGER_THRESHOLD + HYSTERESIS && alertStatus.indexOf("PERIGO") >= 0) {
-      // Mantém perigo até sair da zona de histerese
       alertStatus = "🚨 PERIGO! Nível crítico";
       triggerAlarmSound(true);
     }
@@ -384,7 +616,6 @@ void loop() {
       triggerAlarmSound(false);
     }
     else if (distance <= WARNING_THRESHOLD + HYSTERESIS && alertStatus.indexOf("ALERTA") >= 0) {
-      // Mantém alerta até sair da zona de histerese
       alertStatus = "⚠️ ALERTA! Nível elevado";
       if (isRaining) {
         alertStatus += " + Chuva";
@@ -407,18 +638,25 @@ void loop() {
       logMessage += " | Analog: " + String(rainAnalogValue);
       addLogEntry(logMessage);
       
-      // Envia notificação por Telegram (com cooldown de 20 minutos)
+      // Envia notificação por Telegram
       sendStatusUpdate();
     }
   }
   
-  delay(100); // Delay pequeno para não sobrecarregar o sistema
+  // Atualiza LEDs em intervalo controlado (sem delay)
+  if (currentTime - lastLEDUpdate >= LED_UPDATE_INTERVAL) {
+    lastLEDUpdate = currentTime;
+    // LEDs já são atualizados no updateAllLEDs() acima
+  }
+
+  // Sem delay - loop roda livre!
 }
 
+// ============ FUNÇÕES DO TELEGRAM ============
 void sendStatusUpdate() {
   unsigned long currentTime = millis();
   
-  // Verifica se deve enviar mensagem (cooldown de 20 minutos para mesmo status)
+  // Verifica se deve enviar mensagem (cooldown de 5 minutos para mesmo status)
   if (currentTime - lastTelegramSent < TELEGRAM_COOLDOWN && alertStatus == lastTelegramStatus) {
     Serial.println("⏰ Telegram: Aguardando cooldown (" + String((TELEGRAM_COOLDOWN - (currentTime - lastTelegramSent)) / 60000) + " min restantes)");
     return;
@@ -431,52 +669,45 @@ void sendStatusUpdate() {
     String message = "";
     
     if (alertStatus.indexOf("PERIGO") >= 0) {
-      message = "🚨🆘 ALERTA CRÍTICO - ALAGAMENTO! 🆘🚨\n\n";
-      message += "⚠️ NÍVEL DE ÁGUA CRÍTICO DETECTADO!\n\n";
-      message += "📊 DADOS ATUAIS:\n";
-      message += "🔴 Status: " + alertStatus + "\n";
-      message += "📏 Nível: " + String(distance, 1) + " cm (CRÍTICO!)\n";
-      message += "☔ Chuva: " + String(isRaining ? "SIM - Agravando situação" : "NÃO") + "\n";
-      message += "⏰ Horário: " + getFormattedTime() + "\n\n";
-      message += "🆘 AÇÃO NECESSÁRIA IMEDIATA!\n";
-      message += "📞 Contate as autoridades se necessário\n";
-      message += "🏃‍♂️ Evacue áreas de risco\n";
-      message += "⚠️ Mantenha distância de áreas inundadas";
+      message = "🚨 ALERTA CRÍTICO!\n\n";
+      message += "Nível: " + String(distance, 1) + "cm\n";
+      message += "Status: " + alertStatus + "\n";
+      message += "Horário: " + getRealTime() + "\n";
+      message += "LEDs: Vermelho piscando\n\n";
+      message += "AÇÃO IMEDIATA NECESSÁRIA!";
       
     } else if (alertStatus.indexOf("ALERTA") >= 0) {
-      message = "⚠️🟡 ALERTA DE MONITORAMENTO 🟡⚠️\n\n";
-      message += "📈 Nível da água está elevado!\n\n";
-      message += "📊 SITUAÇÃO ATUAL:\n";
-      message += "🟡 Status: " + alertStatus + "\n";
-      message += "📏 Nível: " + String(distance, 1) + " cm (Elevado)\n";
-      message += "☔ Chuva: " + String(isRaining ? "SIM - Situação pode piorar" : "NÃO") + "\n";
-      message += "⏰ Horário: " + getFormattedTime() + "\n\n";
-      message += "👁️ MANTENHA-SE ATENTO!\n";
-      message += "📱 Monitore atualizações\n";
-      message += "🎒 Prepare-se para possível evacuação";
+      message = "⚠️ ALERTA DE NÍVEL!\n\n";
+      message += "Nível: " + String(distance, 1) + "cm\n";
+      message += "Status: " + alertStatus + "\n";
+      message += "Horário: " + getRealTime() + "\n";
+      message += "LEDs: Amarelo piscando\n\n";
+      message += "Monitore a situação!";
       
+    } else if (previousStatus.indexOf("PERIGO") >= 0 || previousStatus.indexOf("ALERTA") >= 0) {
+      message = "✅ SITUAÇÃO NORMALIZADA\n\n";
+      message += "Nível: " + String(distance, 1) + "cm\n";
+      message += "Status: Normal\n";
+      message += "Horário: " + getRealTime() + "\n";
+      message += "LEDs: Verde fixo\n\n";
+      message += "Sistema sob controle!";
     } else {
-      // Só envia normalização se vinha de estado crítico
-      if (previousStatus.indexOf("PERIGO") >= 0 || previousStatus.indexOf("ALERTA") >= 0) {
-        message = "✅🟢 SITUAÇÃO NORMALIZADA 🟢✅\n\n";
-        message += "😌 O nível da água voltou ao normal\n\n";
-        message += "📊 STATUS ATUAL:\n";
-        message += "✅ Status: " + alertStatus + "\n";
-        message += "📏 Nível: " + String(distance, 1) + " cm (Normal)\n";
-        message += "☔ Chuva: " + String(isRaining ? "SIM - Sem risco atual" : "NÃO") + "\n";
-        message += "⏰ Horário: " + getFormattedTime() + "\n\n";
-        message += "🎉 Situação sob controle!\n";
-        message += "👀 Continuamos monitorando 24/7";
-      } else {
-        // Não envia mensagem para mudanças normais
-        return;
-      }
+      return; // Não envia para mudanças normais
     }
+    
+    // ADICIONE ESTA VERIFICAÇÃO:
+    if (message.length() == 0) {
+      Serial.println("❌ Mensagem vazia - não enviando");
+      return;
+    }
+    
+    Serial.println("📱 Enviando mensagem (" + String(message.length()) + " chars)");
+    Serial.println("📄 Mensagem: " + message);
     
     if (sendTelegramMessage(message)) {
       lastTelegramSent = currentTime;
       lastTelegramStatus = alertStatus;
-      Serial.println("📱 Telegram: Mensagem enviada com sucesso!");
+      Serial.println("✅ Telegram: Mensagem enviada!");
     }
   }
 }
@@ -493,7 +724,7 @@ bool sendTelegramMessage(String message) {
   }
   
   WiFiClientSecure client;
-  client.setInsecure(); // Para simplicidade - em produção, use certificados
+  client.setInsecure();
   HTTPClient http;
   
   if (http.begin(client, TELEGRAM_URL)) {
@@ -504,7 +735,7 @@ bool sendTelegramMessage(String message) {
     doc["chat_id"] = GROUP_CHAT_ID;
     doc["text"] = message;
     doc["parse_mode"] = "HTML";
-    doc["disable_notification"] = false; // Notifica todos no grupo
+    doc["disable_notification"] = false;
     
     String jsonString;
     serializeJson(doc, jsonString);
@@ -529,6 +760,7 @@ bool sendTelegramMessage(String message) {
   return false;
 }
 
+// ============ FUNÇÕES DO SERVIDOR WEB ============
 void handleRoot() {
   String page = htmlPage;
   
@@ -580,6 +812,24 @@ void handleApiData() {
   }
   doc["statusClass"] = statusClass;
   
+  // Status dos LEDs para a interface web
+  doc["ledInternet"] = (WiFi.status() == WL_CONNECTED) ? "on" : "blink";
+  doc["ledTelegram"] = (BOT_TOKEN != "SEU_BOT_TOKEN_AQUI" && GROUP_CHAT_ID != "SEU_GROUP_ID_AQUI" && WiFi.status() == WL_CONNECTED) ? "on" : "blink";
+  
+  if (alertStatus.indexOf("PERIGO") >= 0) {
+    doc["ledPerigo"] = "blink";
+    doc["ledAlerta"] = "off";
+    doc["ledNormal"] = "off";
+  } else if (alertStatus.indexOf("ALERTA") >= 0) {
+    doc["ledPerigo"] = "off";
+    doc["ledAlerta"] = "blink";
+    doc["ledNormal"] = "off";
+  } else {
+    doc["ledPerigo"] = "off";
+    doc["ledAlerta"] = "off";
+    doc["ledNormal"] = "on";
+  }
+  
   doc["logEntries"] = generateLogHtml();
   
   String jsonString;
@@ -588,6 +838,7 @@ void handleApiData() {
   server.send(200, "application/json", jsonString);
 }
 
+// ============ FUNÇÕES AUXILIARES ============
 String generateLogHtml() {
   String logHtml = "";
   for (int i = 0; i < MAX_LOG_ENTRIES; i++) {
@@ -699,14 +950,24 @@ float measureDistance() {
 }
 
 void triggerAlarmSound(bool continuous) {
+  unsigned long currentTime = millis();
+  
   if (continuous) {
+    // Som contínuo para PERIGO
     tone(buzzerPin, 1000);
   } else {
-    unsigned long currentTime = millis();
-    if ((currentTime % 2000) < 1000) {
-      tone(buzzerPin, 800);
-    } else {
-      noTone(buzzerPin);
+    // Som intermitente para ALERTA (usando timer)
+    if (currentTime - lastBuzzerUpdate >= 1000) { // Muda a cada 1 segundo
+      static bool buzzerState = false;
+      buzzerState = !buzzerState;
+      
+      if (buzzerState) {
+        tone(buzzerPin, 800);
+      } else {
+        noTone(buzzerPin);
+      }
+      
+      lastBuzzerUpdate = currentTime;
     }
   }
 }
