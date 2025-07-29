@@ -7,11 +7,11 @@
 
 // Configurações WiFi
 const char* ssid = "EspacoMaker_Tp-link";
-const char* password = "Guilherme";
+const char* password = "";
 
 // Configurações do Bot Telegram para GRUPO
 const String BOT_TOKEN = "token";    // Token do seu bot
-const String GROUP_CHAT_ID = "-1002632781146"; //
+const String GROUP_CHAT_ID = "ID_DO_GRUPO"; // ID do grupo do telegram
 const String TELEGRAM_URL = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage";
 
 // Pinos dos sensores
